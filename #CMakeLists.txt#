@@ -1,0 +1,159 @@
+cmake_minimum_required (VERSION 2.8)
+project (SP_SVM)
+
+#Set the version number
+set (SP_SVM_VERSION_MAJOR 0)
+set (SP_SVM_VERSION_MINOR 1)
+
+# configure a header file to pass some of the settings
+# to the source code
+configure_file (
+  "${PROJECT_SOURCE_DIR}/Config.h.in"
+  "${PROJECT_SOURCE_DIR}/Config.h"
+ )
+
+include_directories("${PROJECT_BINARY_DIR}")
+
+find_package(BLAS REQUIRED)
+find_package(LAPACK REQUIRED)
+
+option (USE_OMP "Build with OpenMP multithreading?" OFF)
+
+if(USE_OMP)
+	find_package(OpenMP 3.0)
+	if (OPENMP_FOUND)
+	    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+	    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+	endif()
+endif()
+
+option (USE_CUDA "Build with CUDA acceleration?" OFF)
+option (USE_CUDA6 "Build with CUDA6 unified memory?" OFF)
+
+if (USE_CUDA)
+	if (USE_CUDA6)
+		find_package(CUDA 6.0)
+	endif()
+	
+	if(CUDA_FOUND)
+		add_definitions(-DCUDA6)
+	else()
+		find_package(CUDA 5.0)
+		if(NOT CUDA_FOUND)
+			message(WARNING "CUDA not found! Reverting to CPU only version...")
+		endif()
+	endif()
+endif()
+
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_20,code=sm_20 -gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=sm_35")
+
+option (DEBUG_MODE "Build in debug mode?" OFF)
+
+if(DEBUG_MODE)
+	set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+	set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+	set (CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -g -G")
+else()
+	set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3")
+	set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+	add_definitions(-DNDEBUG)
+endif()
+
+option(USE_GPROF "Build with gprof profiling information" OFF)
+
+if(USE_GPROF)
+	if (NOT DEBUG_MODE)
+		set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g")
+		set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+	endif()
+
+	set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -pg")
+	set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg")
+endif()
+
+option(USE_CPP11 "Build with c++11 features" ON)
+
+if(USE_CPP11)
+        set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fpermissive")
+        set (CUDA_PROPAGATE_HOST_FLAGS OFF)
+        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -O3")
+        add_definitions(-DCPP11)
+endif()
+
+option (BUILD_STATIC "Build static library?" OFF)
+option (BUILD_SHARED "Build shared library?" OFF)
+
+file (GLOB HEADERS *.h)
+file (GLOB MODELS *_model.cpp)
+set (SOURCE_COMMON bayes_opt.cpp optimize.cpp gaussian_process.cpp predict.cpp pegasos.cpp svm.cpp ${MODELS} parsing.cpp retraining.cpp kernels.cpp train_subset.cpp next_point.cpp hessian.cpp fileIO.cpp kernel_mult.cpp)
+set (SOURCE_BASE host_wrappers.cpp options.cpp)
+
+if(CUDA_FOUND)
+	message(STATUS "Using CUDA...")
+	add_definitions(-DCUDA)
+	cuda_compile(device_wrapper_O device_wrappers.cu)
+
+	set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE OFF)
+
+	cuda_add_executable(train_mc train_mc.cpp ${SOURCE_COMMON} ${device_wrapper_O} ${SOURCE_BASE} ${HEADERS})
+	CUDA_ADD_CUBLAS_TO_TARGET( train_mc )
+
+	cuda_add_executable(classify_mc classify_mc.cpp ${SOURCE_COMMON} ${device_wrapper_O} ${SOURCE_BASE} ${HEADERS})
+	CUDA_ADD_CUBLAS_TO_TARGET( classify_mc )
+
+	if (BUILD_STATIC)
+		cuda_add_library(wusvm_static STATIC wusvm.cpp ${SOURCE_COMMON} ${device_wrapper_O} ${SOURCE_BASE} ${HEADERS})
+	endif()
+
+	if (BUILD_SHARED)
+		cuda_add_library(wusvm SHARED wusvm.cpp ${SOURCE_COMMON} ${device_wrapper_O} ${SOURCE_BASE} ${HEADERS})
+	endif()
+	
+else ()
+	add_executable(train_mc train_mc.cpp ${SOURCE_COMMON} ${SOURCE_BASE} ${HEADERS})
+	add_executable(classify_mc classify_mc.cpp ${SOURCE_COMMON} ${SOURCE_BASE} ${HEADERS})
+	
+	if (BUILD_STATIC)
+		add_library(wusvm_static STATIC wusvm.cpp ${SOURCE_COMMON} ${SOURCE_BASE} ${HEADERS})
+	endif()
+
+	if (BUILD_SHARED)
+		add_library(wusvm SHARED wusvm.cpp ${SOURCE_COMMON} ${SOURCE_BASE} ${HEADERS})
+	endif()
+endif()
+
+set_property(TARGET classify_mc APPEND PROPERTY COMPILE_DEFINITIONS CLASSIFY)
+
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
+target_link_libraries(train_mc ${BLAS_LINKER_FLAGS} ${BLAS_LIBRARIES})
+target_link_libraries(train_mc ${LAPACK_LINKER_FLAGS} ${LAPACK_LIBRARIES})
+
+target_link_libraries(classify_mc ${BLAS_LINKER_FLAGS} ${BLAS_LIBRARIES})
+target_link_libraries(classify_mc ${LAPACK_LINKER_FLAGS} ${LAPACK_LIBRARIES})
+
+install (TARGETS train_mc DESTINATION bin)
+install (TARGETS classify_mc DESTINATION bin)
+
+if (BUILD_STATIC)
+	target_link_libraries(wusvm_static ${BLAS_LINKER_FLAGS} ${BLAS_LIBRARIES})
+	target_link_libraries(wusvm_static ${LAPACK_LINKER_FLAGS} ${LAPACK_LIBRARIES})
+	install (TARGETS wusvm_static DESTINATION bin)
+endif()
+
+if (BUILD_SHARED)
+	target_link_libraries(wusvm ${BLAS_LINKER_FLAGS} ${BLAS_LIBRARIES})
+	target_link_libraries(wusvm ${LAPACK_LINKER_FLAGS} ${LAPACK_LIBRARIES})
+	install (TARGETS wusvm DESTINATION bin)
+endif()
+
+if (BUILD_STATIC OR BUILD_SHARED)
+	install (FILES wusvm.h DESTINATION bin)
+endif()
+
+include (InstallRequiredSystemLibraries)
+set (CPACK_RESOURCE_FILE_LICENSE  
+    "${CMAKE_CURRENT_SOURCE_DIR}/license.txt")
+set (CPACK_PACKAGE_VERSION_MAJOR "${SP_SVM_VERSION_MAJOR}")
+set (CPACK_PACKAGE_VERSION_MINOR "${SP_SVM_VERSION_MINOR}")
+include (CPack)

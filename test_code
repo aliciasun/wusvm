@@ -1,0 +1,32 @@
+//	using namespace lasp;
+//	LaspMatrix<double> a = make_matrix<double>("1 2 ; 3 4");
+//	LaspMatrix<double> b = make_matrix<double>("1 2 ; 3 4");
+//	LaspMatrix<double> c;// =  1 + a + b - a + 5 - b + b - 10;
+//	b = 1 + a + b - a + 5 - b + b - 10;
+//	c = (t(sel(pdf(t(b)), 0, 0, 1, 2)) * ones(1, 2)) / 0.5;
+//	a.printMatrix("A");
+//	b.printMatrix("B");
+//	c.printMatrix("C");
+//
+//	LaspMatrix<double> d = make_matrix<double>("5 6 1 ; 3 2 3 ; 7 9 7");
+//	LaspMatrix<double> e = make_matrix<double>("5 9 3");
+//	d.printMatrix("D");
+//	e.printMatrix("E");
+//
+//	LaspMatrix<double> f = max(d / e);
+//
+//	f.printMatrix("F");
+//
+//	print(csum(d), "DSUM");
+//
+//	print(hcat(e, e, e, e), "E");
+//
+//	for(int i = 0; i < 1000; ++i) {
+//		LaspMatrix<double> g = rand<double>(1000);
+//		LaspMatrix<double> h = rand<double>(1000);
+//		LaspMatrix<double> k = sel(h - (g * rand<double>(1000)), 0,0,500,500);
+//		LaspMatrix<double> m = t(csum(sel(t(pdf(g + h - g * rand<double>(1000))), 0, 0, 500 , 500)));
+//		LaspMatrix<double> n = rand<double>(500) / m;
+//	}
+//
+//	return 0;

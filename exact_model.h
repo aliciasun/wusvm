@@ -1,0 +1,710 @@
+//
+//  exact_model.h
+//  SP_SVM
+//
+//  Created by Nick Kolkin on 10/26/14.
+//
+//
+
+#ifndef __EXACT_SVM__svm_model__
+#define __EXACT_SVM__svm_model__
+
+#include <iostream>
+#include "base_model.h"
+#include "optimize.h"
+#include "lasp_func.h"
+
+
+namespace lasp {
+
+	//Gaussian process regression model
+	template<class T>
+		class SVM_exact: public Model<T, int> {
+			protected:
+				//Xin: training data Yin:labels K:store kernel matrix  
+				 //IO:select the data points you want to train on
+				//B:output  originalPosition
+			LaspMatrix<T> Xin, Yin, K, I0, prevI0, B, originalPositions;
+			int n, d, nOrig;
+			T bias,lambda;
+
+			opt& options(){
+				return this->options_;
+			}
+
+
+			public:
+			SVM_exact();
+			SVM_exact(opt opt_in);
+
+			LaspMatrix<T> get_hyp();
+			vector<string> get_hyp_labels();
+			int set_hyp(LaspMatrix<T> hyp);
+
+			int init() {
+				d = Xin.rows();
+				n = Xin.cols();
+				nOrig = n;
+				originalPositions = LaspMatrix<T>(n,1,0.0);
+				
+				B = LaspMatrix<T>(n,1,0.0);
+				//for (int i = 0; i < n; i++) {
+				//B(i,0) = 2*((double) std::rand() / (RAND_MAX)) - 1;
+				//}
+				//B.printMatrix("exactB");
+				//#pragma omp parallel for
+				prevI0 = LaspMatrix<T>(n,n,0.0);
+				for (int i = 0; i < n; i++) {
+					originalPositions(i) = i;
+					prevI0(i,i) = 1.0;
+				}
+				I0.copy(prevI0);
+				return 0;
+			}
+
+			virtual int train(LaspMatrix<T> X, LaspMatrix<int> y);//not defined yet
+			int retrain(LaspMatrix<T> X, LaspMatrix<int> y);
+			int train_internal();
+			//added by Nick
+
+			//everthing to do with evaluating the loss function, taking gradients, climbing candy mountain, etc.
+			T evaluate();
+			T evaluate(LaspMatrix<T> & gradient);
+			T evaluate(LaspMatrix<T> & gradient, LaspMatrix<T> & hessian);
+			T evaluate(LaspMatrix<T> & gradient, LaspMatrix<T> & hessian, bool computeGrad, bool computeHessian);
+			T lossPrimal();
+			LaspMatrix<T> gradientPrimal();
+			LaspMatrix<T> hessianPrimal();
+
+			//gardening section (pruning support vectors with weight zero for efficiency)
+			int pruneData();
+
+			//end
+
+			virtual int predict(LaspMatrix<T> X, LaspMatrix<int>& output);
+			int confidence(LaspMatrix<T> X, LaspMatrix<T>& output);
+			int predict_confidence(LaspMatrix<T> X, LaspMatrix<int>& output_predictions, LaspMatrix<T>& output_confidence);
+			int distance(LaspMatrix<T> X, LaspMatrix<T>& output);
+
+			virtual T score(LaspMatrix<int> y_pred, LaspMatrix<int> y_actual);
+			T loss(LaspMatrix<T> y_prob, LaspMatrix<int> y_actual);
+			T loss(LaspMatrix<int> y_pred, LaspMatrix<T> y_prob, LaspMatrix<int> y_actual);
+
+			T test(LaspMatrix<T> X, LaspMatrix<T> y);
+			T test_loss(LaspMatrix<T> X, LaspMatrix<T> y);
+
+			T operator()(LaspMatrix<T> w_in);
+			T operator()(LaspMatrix<T> w_in, LaspMatrix<T>& grad);
+			T operator()(LaspMatrix<T> w_in, LaspMatrix<T>& grad, LaspMatrix<T>& hess);
+
+			vector<int> get_sv();
+			void save(const char* output_file); 
+		};
+
+	//THESE ARE NOT TEMPLATED, I'M SORRY GABE :'(
+	template <class T>
+		T SVM_exact<T>::evaluate(){
+			LaspMatrix<T> g,h;
+			return evaluate(g, h, false, false);
+		}
+
+	template <class T>
+		T SVM_exact<T>::evaluate(LaspMatrix<T> & gradient){
+			LaspMatrix<T> h;
+			return evaluate(gradient, h, true, false);
+		}
+
+	template <class T>
+		T SVM_exact<T>::evaluate(LaspMatrix<T> & gradient, LaspMatrix<T> & hessian){
+			return evaluate(gradient, hessian, true, true);
+		}
+
+	template <class T>
+		T SVM_exact<T>::evaluate(LaspMatrix<T> & gradient, LaspMatrix<T> & hessian, bool computeGrad, bool computeHessian){
+			//cout << "Pruning" << endl;
+            //pruneData();
+                        //this->B = this->B / (((LaspMatrix<T>)(this->B))(0,0));
+			//cout << "COMPUTING LOSS" << endl;
+			T loss = lossPrimal();
+			//cout << "LOSS: " << loss << endl;
+			//cout << "N: " << ((LaspMatrix<T>)sum(I0))(0,0) << endl;
+			if (computeGrad){
+			  //cout << "COMPUTING GRADIENT" << endl;
+			  gradient = gradientPrimal();
+			} 
+			if (computeHessian){
+			  //cout << "COMPUTING HESSIAN" << endl;
+			  hessian = hessianPrimal();
+			}
+			
+			//cout << "DONE EVALUATING" << endl;
+
+			return loss;
+
+		}
+
+	template <class T>
+		int SVM_exact<T>::pruneData(){
+
+			int n = this->n;
+			int d = this->d;
+			cout << "N: " << n << endl;
+			//vector<int> nonZeroBetas;
+			//B.printMatrix("B");
+			//for (int i=0; i<n; ++i){
+			//  if (this->B(i,0) != 0.0 ){
+			    //cout << "I'm an apple" << endl;
+			//    nonZeroBetas.push_back(i);
+			//  }
+			//}
+			//cout << "the apples have been couted my liege" << endl;
+
+
+			int newN = ((LaspMatrix<T>)sum(I0))(0,0);
+			cout << newN << endl;
+			if (newN == n) {
+			  return 0;
+			}
+			cout << "pruning from " << n << " to " << newN << " basis vectors" << endl;
+			LaspMatrix<T> newOrigPosits = LaspMatrix<T>(newN, 1, 0.0);
+			LaspMatrix<T> newB = LaspMatrix<T>(newN,1,0.0);
+			//LaspMatrix<T> newX = LaspMatrix<T>(newN, d,0.0);
+			LaspMatrix<T> newY = LaspMatrix<T>(newN, 1,0.0);
+			LaspMatrix<T> newK = LaspMatrix<T>(newN, newN, 0.0);
+            
+            
+            
+            
+            
+			vector<int> nonZeroBetas;
+			for (int i = 0; i < n; i++) {
+			  if (I0(i,i) == 1) {
+			    nonZeroBetas.push_back(i);
+			  }
+			}
+			this->I0 = LaspMatrix<T>(newN,newN,0.0);
+			//OMP BEATCH
+			//#pragma omp parallel for
+			for (int col = 0; col < newN; ++col){
+			  //cout << "col: " << col << endl;
+			  newOrigPosits(col,0) = this->originalPositions(nonZeroBetas[col],0);
+			  newY(col,0) = this->Yin(nonZeroBetas[col],0);
+			  newB(col,0) = this->B(nonZeroBetas[col],0);
+			  this->I0(col,col) = 1;
+			  //for (int row = 0; row < d; ++row){
+			  //  newX(col,row) = this->Xin(nonZeroBetas[col],row);//ask gabe it we can straight copy a row in one fell swoop
+			  //}
+			  for (int row = 0; row < newN; ++row){
+			    newK(col,row) = this->K(nonZeroBetas[col], nonZeroBetas[row]);
+			  }
+			}
+			
+			//"release is not not safe" -Gabriel Hope 
+			//"YOLO tho" -chip and nick
+			//	this.originalPostions.release();
+			//	this.B.release();
+			//	this.Xin.release();
+			//	this.Yin.release();
+			//	this.K.release();
+			//FLY FREE!  
+
+			this->originalPositions = newOrigPosits;
+			this->B = newB;
+			//this->Xin = newX;
+			this->Yin = newY;
+			this->K = newK;
+			this->n = newN;
+			prevI0.copy(I0);
+	    
+			return 0; //replace with SUCCESS enum
+		} 
+
+	template <class T>
+		T SVM_exact<T>::lossPrimal(){
+			int n = this->n;
+			T C = this->options().C;
+			
+			LaspMatrix<T> KBt = this->K*lasp::t(this->B);
+			LaspMatrix<T> tempMatrix = (this->B*KBt);
+			if (tempMatrix.size() > 1) {
+				cout << "WRONG SIZE" << endl;
+				std::cin.ignore();
+			}
+			T term1 = tempMatrix(0,0);
+
+			T term2 = 0;
+			T temp,temp2;
+			
+			//prevI0.copy(I0);
+			this->I0 = LaspMatrix<T>(n,n,0.0);
+			//#pragma omp parallel for
+			for (int i = 0; i < n; ++i){
+				temp = KBt(0,i)*this->Yin(i,0);
+				temp2 = std::max(0.0,1.0-temp);
+				if (temp >= 1.0 && temp2 != 0) {
+					cout << "NOOOO" << endl;
+					std::cin.ignore();
+				}
+				if (temp2 != 0){
+					this->I0(i,i) = 1.0;
+					term2 += temp2 * temp2;
+				        //term2 += (1-temp) * (1-temp);
+                    			if (prevI0(i,i) == 0) {
+						//std::cin.ignore();
+                   			 }
+				}
+                		if (this->prevI0(i,i) != this->I0(i,i)) {
+					//cout << "HOLY SHIT" << endl;
+				}
+			}
+			if (term1 < 0) {
+				cout << "BAD" << endl;
+				std::cin.ignore();
+			}
+			if (term2 < 0) {
+				cout << "EVEN WORSE" << endl;
+				std::cin.ignore();
+			}
+            		//cout << "N: " << ((LaspMatrix<T>)sum(this->I0))(0,0) << endl;
+			return 0.5*term1 + C*term2;
+		}
+
+	template <class T>
+	LaspMatrix<T> SVM_exact<T>::gradientPrimal(){
+	      T C = this->options().C;
+	      LaspMatrix<T> KBt = this->K*t(this->B);
+	      LaspMatrix<T> gradient = KBt + (2 * C * this->K * this->I0 * (KBt - t(this->Yin)));
+	      return t(gradient);
+	}
+
+	template <class T>
+		LaspMatrix<T> SVM_exact<T>::hessianPrimal(){
+	        T C = this->options().C;
+			LaspMatrix<T> hessian = this->K + (2*C*this->K*this->I0*this->K);
+            //this->B.printMatrix("exactB");
+			return hessian;
+		}
+
+
+	//End not templated things
+
+	template<class T>
+		SVM_exact<T>::SVM_exact() {
+			options().kernel = LINEAR;
+		}
+
+	template<class T>
+		SVM_exact<T>::SVM_exact(opt opt_in) {
+			options() = opt_in;
+		}
+
+	template <class T>
+		LaspMatrix<T> SVM_exact<T>::get_hyp(){
+			LaspMatrix<T> hyp(1, 2);
+			hyp(0) = static_cast<T>(options().C);
+			hyp(1) = static_cast<T>(options().eta);
+			hyp(2) = static_cast<T>(options().set_size);
+
+			switch (options().kernel) {
+				case RBF:
+					hyp.resize(1, 4);
+					hyp(3) = static_cast<T>(options().gamma);
+					break;
+				case POLYNOMIAL:
+					hyp.resize(1, 5);
+					hyp(3) = static_cast<T>(options().coef);
+					hyp(4) = static_cast<T>(options().degree);
+					break;
+				case SIGMOID:
+					hyp.resize(1, 5);
+					hyp(3) = static_cast<T>(options().coef);
+					hyp(4) = static_cast<T>(options().gamma);
+					break;
+				default:
+					break;
+			}
+
+			return hyp;
+		}
+
+	template <class T>
+		vector<string> SVM_exact<T>::get_hyp_labels(){
+			vector<string> output;
+			output.push_back("C");
+			output.push_back("eta");
+			output.push_back("set_size");
+
+			switch (options().kernel) {
+				case RBF:
+					output.push_back("gamma");
+					break;
+				case POLYNOMIAL:
+					output.push_back("coef");
+					output.push_back("degree");
+					break;
+				case SIGMOID:
+					output.push_back("coef");
+					output.push_back("gamma");
+					break;
+				default:
+					break;
+			}
+
+			return output;
+		}
+
+	template <class T>
+		int SVM_exact<T>::set_hyp(LaspMatrix<T> hyp){
+			options().C = static_cast<double>(hyp(0));
+			options().eta = static_cast<double>(hyp(1));
+			options().set_size = static_cast<int>(hyp(2));
+
+			switch (options().kernel) {
+				case RBF:
+					options().gamma = static_cast<double>(hyp(3));
+					break;
+				case POLYNOMIAL:
+					options().coef = static_cast<double>(hyp(3));
+					options().degree = static_cast<double>(hyp(4));
+					break;
+				case SIGMOID:
+					options().coef = static_cast<double>(hyp(3));
+					options().gamma = static_cast<double>(hyp(4));
+					break;
+				default:
+					break;
+			}
+
+			return 0;
+		}
+
+	template <class T>
+		int SVM_exact<T>::train(LaspMatrix<T> X, LaspMatrix<int> y){
+
+			LaspMatrix<T> temp = y.convert<T>();			
+
+			//if (options().usebias && options().bias != 0) {
+			//	Xin = LaspMatrix<T>::hcat(Xin, LaspMatrix<T>::vcat(X, LaspMatrix<T>::ones(X.cols(), 1)));
+			//	bias = true;
+			//} else {
+            Xin = LaspMatrix<T>::hcat(Xin, X);
+			//	bias = false;
+			//}
+
+			Yin = hcat(Yin, temp);
+			cout << "INIT" << endl;
+			this->init();
+			cout << "TRAIN INTERNAL" << endl;
+			return this->train_internal();
+		}
+
+	template <class T>
+		int SVM_exact<T>::retrain(LaspMatrix<T> X, LaspMatrix<int> y){
+			Xin = LaspMatrix<T>();
+			Yin = LaspMatrix<T>();
+			return train(X, y);
+		}
+
+	template<class T>
+		int SVM_exact<T>::train_internal(){
+			bool gpu = true;//options().usegpu;
+
+			//Check that we have a CUDA device
+			if (gpu && DeviceContext::instance()->getNumDevices() < 1) {
+				if (options().verb > 0) {
+					cerr << "No CUDA device found, reverting to CPU-only version" << endl;
+				}
+
+				options().usegpu = false;
+				gpu = false;
+			} else if(!gpu){
+				DeviceContext::instance()->setNumDevices(0);
+			} else if (options().maxGPUs > -1){
+				DeviceContext::instance()->setNumDevices(options().maxGPUs);
+			}
+
+			//Timing Variables
+			clock_t baseTime = clock();
+
+			//kernel options struct for computing the kernel
+			kernel_opt kernelOptions = options().kernel_options();
+
+			//Training examples
+			LaspMatrix<T> x = Xin;
+
+			//Training labels
+			LaspMatrix<T> y = Yin;
+			cout << "TRANSFER TO GPU" << endl;
+			//Move data to the gpu
+			if (gpu) {
+				int err = x.transferToDevice();
+				err += y.transferToDevice();
+
+				if (err != MATRIX_SUCCESS) {
+					x.transferToHost();
+					y.transferToHost();
+
+					if (options().verb > 0) {
+						cerr << "Device memory insufficient for data, reverting to CPU-only computation" << endl;
+					}
+
+					gpu = false;
+				}
+			}
+
+			//Norm of each training vector
+			//LaspMatrix<T> xNorm (n,1, 0.0);
+			//x.colSqSum(xNorm);
+
+
+			
+			//"fly you FOOLS!!" - Gabriel Hope, 2014
+			cout << "COMPUTING KERNEL" << endl;
+			this->K = LaspMatrix<T>(n,n,0.0);
+			// @chip, why don't we just use a matrix multiply?
+			#pragma omp parallel for
+			for (int i = 0; i < this->n; i++) {
+				for (int j = i; j < this->n; j++) {
+					T sum = 0;
+					for (int k = 0; k < this->d; k++) {
+						sum += x(i,k) * x(j,k);
+					}
+					this->K(i,j) = sum;
+					this->K(j,i) = sum;
+				}
+			}
+			//this->K = t(x) * x;
+			cout << "KERNEL COMPUTED" << endl;
+            //K.printMatrix("K");
+
+			//Move support vector stuff to gpu
+			if (gpu) {
+				B.transferToDevice();
+				K.transferToDevice();
+			}
+			cout << "CONJUGATE OPTIMIZING!!!" << endl;
+            //options().maxiter = 5;
+			optimize_options opt_opt = optimize_options();
+			opt_opt.maxIter = 5000;
+			opt_opt.epsilon = .0001;
+			opt_opt.gpu = gpu;
+			//for (int i = 0; i < 1; i++) {
+			conjugate_optimize(*this, B, opt_opt);
+			//lossPrimal();
+			//pruneData();
+			//}
+			//pruneData();
+			//B.printMatrix("exactB");
+			//originalPositions.printMatrix("OP");
+			
+			/*
+			cout << "NEWTON OPTIMIZING" << endl;
+			//options().maxiter = 20;
+			opt_opt.maxIter = 50000;
+			//newton_optimize(*this, B, opt_opt);
+			LaspMatrix<T> KBt,oldB,term1,term2,grad,temp,step;
+			T diff = 2*opt_opt.epsilon;
+			T C = this->options().C;
+			int n = this->n;
+			int iter = 0;
+			T z,value,oldValue;
+			value = 999999999;
+			KBt = this->K*lasp::t(this->B);
+			this->I0 = LaspMatrix<T>(n,n,0.0);
+			
+                        #pragma omp parallel for
+			for (int i = 0; i < n; ++i){
+			  z = (KBt(0,i)*this->Yin(i,0));
+			  //cout << "Yin: " << this->Yin(i,0) << endl;
+			  //cout << "KB: " << KBt(0,i) << endl;
+			  //cout << "Z: " << z << endl;
+			  if (z < 1.0) {
+			    this->I0(i,i) = 1.0;
+			  }
+			}
+			T stepsize = .01;
+			while (iter < opt_opt.maxIter && diff > opt_opt.epsilon) {
+			  //this->prevI0 = copy(this->I0);
+			  //cout << "N: " << ((LaspMatrix<T>)sum(this->I0))(0,0) << endl;
+			  term1 = (lambda*lasp::eye<T>(n)) + (this->I0 * this->K);
+			  term2 = this->I0 * t(this->Yin);
+			  term1.solve(term2,step);
+			  oldB = copy(this->B);
+			  this->B = (1.0-stepsize)*this->B + stepsize*t(step);
+			  //#pragma omp parallel for
+			  //for (int i = 0; i < n; i++) {
+			  //	if (this->I0(i,i) == 0) {
+			  //		this->B(i,i) = 0.0;
+			  //	}
+			  //}
+			  //          	KBt = this->K*lasp::t(this->B);
+			  //          	this->I0 = LaspMatrix<T>(n,n,0.0);
+			  //          	//#pragma omp parallel for
+			  //          	for (int i = 0; i < n; ++i){
+			  //      		z = (KBt(0,i)*this->Yin(i,0));
+			  //      		//cout << "Yin: " << this->Yin(i,0) << endl;
+			  //      		//cout << "KB: " << KBt(0,i) << endl;
+			  //      		//cout << "Z: " << z << endl;
+			  //      		if (z < 1.0) {
+			  //      	    		this->I0(i,i) = 1.0;
+			  //      		}
+			  //          	}
+			  oldValue = value;
+			  value = evaluate(grad);
+			  if (value > oldValue) {
+			    stepsize *= .5;
+			    this->B = oldB;
+			    value = evaluate();
+			  } else {
+			    stepsize *= 1.05;
+			  }
+			  grad = t(grad);
+			  grad.colSqSum(temp);
+			  diff = temp(0,0);
+			  if (temp.size() > 1) {
+			    cout << "BAD" << endl;
+			  }
+			  cout << "diff: " << diff << endl;
+			  iter++;
+			}
+			
+			*/
+
+			double diff;
+			LaspMatrix<T> temp;
+			LaspMatrix<T> grad;
+			grad = gradientPrimal();
+			grad = t(grad);
+			grad.colSqSum(temp);
+			diff = temp(0,0);
+			if (temp.size() > 1) {
+			  cout << "BAD" << endl;
+			}
+			cout << "diff: " << diff << endl;
+			
+			int d = this->d;
+			LaspMatrix<T> w = LaspMatrix<T>(1,d,0.0);
+			//cout << this->Xin.rows() << endl;
+			//cout << this->Xin.cols() << endl;
+			//cout << this->B.rows() << endl;
+			//cout << this->B.cols() << endl;
+			//LaspmMatrix<T> temp2 = LaspMatrix<T>(this->B.size,d,0.0);
+			//#pragma omp parallel for
+			for (int i = 0; i < this->B.size(); i++) {
+			  //cout << i << endl;
+			  w = w + this->B(i,0) * csel(this->Xin,i); //wrong indices when pruning
+			}
+			w.printMatrix("w");
+
+			//grad.printMatrix("grad");
+			//gradientPrimal().printMatrix("grad");
+			
+			
+
+			if (gpu) {
+				B.transferToHost();
+			}
+			B.printMatrix("exactB");
+			if (options().verb > 0){
+				cout << "Training Complete" << endl;
+			}
+			cout << "DONE" << endl;
+            
+			return 0;
+		}
+
+	template <class T>
+		int SVM_exact<T>::predict(LaspMatrix<T> X, LaspMatrix<int>& output){
+            output = LaspMatrix<int>(Xin.cols(),1,0);
+           // #pragma omp parallel for
+            for (int i = 0; i < X.cols(); i++) {
+                T score = 0;
+                for (int j = 0; j < B.size(); j++) {
+                    LaspMatrix<T> temp = ( t(csel(Xin,j)) * csel(X,i) );
+                    score += B(j) * temp(0,0);
+                }
+                output(i,0) = ((0 < score) - (score < 0));
+            }
+            return 0;
+		}
+
+	template <class T>
+		int SVM_exact<T>::confidence(LaspMatrix<T> X, LaspMatrix<T>& output){
+			return -1;
+		}
+
+	template <class T>
+		int SVM_exact<T>::predict_confidence(LaspMatrix<T> X, LaspMatrix<int>& output_predictions , LaspMatrix<T>& output_confidence){
+            return -1;
+		}
+
+	template <class T>
+		int SVM_exact<T>::distance(LaspMatrix<T> X, LaspMatrix<T>& output){
+			return -1;
+		}
+
+	template <class T>
+		T SVM_exact<T>::score(LaspMatrix<int> y_pred, LaspMatrix<int> y_actual){
+            double sum = 0;
+//#pragma omp paralell for
+            for (int i = 0; i < y_pred.size(); i++) {
+                if (y_pred(i,0) == y_actual(i,0)) {
+                    sum += 1.0;
+                }
+            }
+            return sum / y_pred.size();
+		}
+
+	template <class T>
+		T SVM_exact<T>::loss(LaspMatrix<T> y_prob, LaspMatrix<int> y_actual){
+			return -1;
+		}
+
+	template <class T>
+		T SVM_exact<T>::loss(LaspMatrix<int> y_pred, LaspMatrix<T> y_prob, LaspMatrix<int> y_actual){
+			return -1;
+		}
+
+	template <class T>
+		T SVM_exact<T>::test(LaspMatrix<T> X, LaspMatrix<T> y){
+			return -1;
+		}
+
+	template <class T>
+		T SVM_exact<T>::test_loss(LaspMatrix<T> X, LaspMatrix<T> y){
+			return -1;
+		}
+
+	template<class T>
+		vector<int> SVM_exact<T>::get_sv() {
+			return originalPositions;
+		}
+
+
+	template<class T>
+		T SVM_exact<T>::operator()(LaspMatrix<T> b_in){
+			this->B = b_in;
+			return evaluate();
+		}
+
+	template<class T>
+		T SVM_exact<T>::operator()(LaspMatrix<T> b_in, LaspMatrix<T>& grad){
+			this->B = b_in;
+			return evaluate(grad);
+		}
+
+	template<class T>
+		T SVM_exact<T>::operator()(LaspMatrix<T> b_in, LaspMatrix<T>& grad, LaspMatrix<T>& hess){
+			this->B = b_in;
+			return evaluate(grad, hess);
+		}
+
+	template<class T>
+		void SVM_exact<T>::save(const char* output_file){
+
+		}
+
+}
+
+
+#endif /* defined(__SP_SVM__svm_model__) */
