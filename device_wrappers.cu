@@ -1461,6 +1461,7 @@ int device_eWiseDiv(DeviceParams params, double* in1, double* in2, double* out, 
   template int device_convert<float, double>(DeviceParams params, double* in, float* out, size_t rows, size_t cols, size_t mRows);
   template int device_convert<double, double>(DeviceParams params, double* in, double* out, size_t rows, size_t cols, size_t mRows);
   template int device_convert<float, float>(DeviceParams params, float* in, float* out, size_t rows, size_t cols, size_t mRows);
+  template int device_convert<double, int>(DeviceParams params, int* in, double* out, size_t rows, size_t cols, size_t mRows);
 
 
   //Here and below is the device kernel code
